@@ -1,0 +1,10 @@
+{
+  "name": "edgeone-blog",
+  "version": "0.6.0",
+  "private": true,
+  "type": "module",
+  "description": "云尚博客 · EdgeOne Makers 版（全站数据落在平台自带的 Blob 存储上）",
+  "dependencies": {
+    "@edgeone/pages-blob": "^0.0.16"
+  }
+}
