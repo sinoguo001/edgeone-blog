@@ -376,6 +376,7 @@ function postCard(p, s) {
     <div class="pc-meta">
       <time>${fmtDate(p.published_at || p.created_at)}</time>
       ${cat ? `<span class="dot">·</span>${cat}` : ''}
+      <span class="dot">·</span><span>阅读 ${p.view_count || 0}</span>
       <span class="dot">·</span><span>${p.comment_count || 0} 评论</span>
     </div>
     <h2 class="pc-title"><a href="${url}">${esc(p.title)}</a></h2>
@@ -459,6 +460,7 @@ export function renderArticle(s, post, extra) {
     `<span>${esc(s.get('author_name'))}</span>`,
     `<time>${fmtDate(post.published_at, true)}</time>`,
     post.category ? `<a href="${esc(catUrl(post.category))}">${esc(post.category.name)}</a>` : '',
+    `<span>${post.view_count || 0} 次阅读</span>`,
   ].filter(Boolean).join('<span class="dot">·</span>');
   const pn = extra.siblings;
   const pnHtml = `<nav class="pn">

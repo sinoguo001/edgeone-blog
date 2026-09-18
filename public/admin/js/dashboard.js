@@ -38,8 +38,10 @@ const statCard = (label, num, sub, tone) => `
   </div>`;
 
 // 总览数字。原先还有「网站访问量（PV）」与「累计访客」两张指标，
-// 已随统计功能一并移除：底层 Blob 存储没有原子自增，这类「每次访问 +1」
+// 已移除：底层 Blob 存储没有原子自增，全站 PV/UV 这类「每次访问 +1」
 // 的计数必然不准，留着只会给出误导性的数字。
+// 文章阅读数与它们不同（写频次低得多），已恢复，但**不做汇总卡片** ——
+// 整站的「累计阅读」这种口径不需要，热度看下方「热门文章 TOP 5」即可。
 function countsHtml(c, lk) {
   const avgWord = c.posts ? Math.round((c.words || 0) / c.posts) : 0;
   const pendTxt = c.pending > 0 ? `<b class="warn-txt">${c.pending} 条待审核</b>` : '无待审核';
@@ -107,6 +109,14 @@ const postItem = (p) => `
     </div>
   </div>`;
 
+// 热门文章 TOP 5 的一条：序号 + 标题 + 阅读数（前三名序号高亮，见 .dt-r.hot）
+const topItem = (p, i) => `
+  <div class="dt-item">
+    <span class="dt-r${i < 3 ? ' hot' : ''}">${i + 1}</span>
+    <a class="dt-t" href="${esc(p.url || ('/post/' + p.slug))}" target="_blank" rel="noopener">${esc(p.title)}</a>
+    <span class="hint">${fmtNum(p.views)} 次</span>
+  </div>`;
+
 // ---------- 整页 HTML ----------
 export function dashboardHtml(d, username) {
   const c = d.counts || {};
@@ -118,6 +128,8 @@ export function dashboardHtml(d, username) {
   const rp = d.recent_posts || [];
   const rpDraft = rp.filter((p) => p.status !== 'published').length;
   const rpNote = rp.length ? `最新 ${rp.length} 篇${rpDraft ? ` · 含 ${rpDraft} 篇草稿` : ''}` : '';
+  // 热门文章 TOP 5：后端已按阅读数排好序，这里只负责过滤与渲染
+  const tp = d.top_posts || [];
   const pendBox = pend.length
     ? `<div class="card dash-warn">
         <div class="dash-warn-h">
@@ -163,6 +175,12 @@ export function dashboardHtml(d, username) {
         ${rp.length
           ? rp.map(postItem).join('') + '<div class="dash-more"><a href="#/posts">查看全部文章 →</a></div>'
           : '<div class="empty-note">还没有文章，点右上角「写文章」开始创作。</div>'}
+      </div>
+      <div class="card">
+        <div class="sec-title">热门文章 TOP 5<small>按累计阅读量</small></div>
+        ${tp.length
+          ? (tp.filter((p) => p.views > 0).map(topItem).join('') || '<div class="empty-note">还没有阅读数据</div>')
+          : '<div class="empty-note">还没有已发布文章</div>'}
       </div>
     </div>
     <div>

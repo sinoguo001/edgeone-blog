@@ -483,11 +483,22 @@ async function api(ctx, url, seg, method, envIn) {
     });
   }
 
-  // --- 已移除：/api/view（文章阅读量）与 /api/hit（全站 PV/UV）---
-  // 两者都是「每次访问 +1」的高频写。数据层落在 Blob 上（平台自带的 KV 仅支持
-  // 边缘函数，本项目跑在云函数上用不了），而 Blob 没有原子自增，并发下的
-  // 「读—改—写」必然丢计数。与其显示一个不准的数字，不如不做：
-  // 相关表、字段、后台看板与前端上报已一并清除，前台也不再请求这两个地址。
+  // --- 文章阅读量（公开） ---
+  // 只统计「单篇文章」被打开的次数，供文章页与后台列表显示。
+  // ⚠️ 注意与 /api/hit 的区别：那个是整站 PV（每次访问 +1），写入频率太高，
+  //    在 Blob 上没有原子自增必然丢计数 —— 已整个下线，不要再把它加回来。
+  //    阅读数是文章维度的低频写，可以接受偶发少记一次。
+  // 前端在文章详情页用 fetch 异步上报，不等结果，失败也不影响阅读。
+  if (seg[0] === 'view' && method === 'POST' && seg.length === 1) {
+    const b = (await readJson(request)) || {};
+    try {
+      if (b.slug) await db.incView(dbx, String(b.slug));
+    } catch (e) {
+      // 计数挂了不能连累读者：静默记录，照常返回成功
+      console.error('view error:', e);
+    }
+    return json({ ok: true });
+  }
 
   // --- 读者提交评论（公开） ---
   if (seg[0] === 'comments' && method === 'POST' && seg.length === 1) {
@@ -737,13 +748,15 @@ async function api(ctx, url, seg, method, envIn) {
   // 所有查询并行发起，避免串行往返把延迟叠加起来。
   if (seg[0] === 'dashboard' && method === 'GET' && seg.length === 1) {
     const monthStart = bnNow().slice(0, 8) + '01'; // 本月 1 号 00:00（北京时间字符串可直接比大小）
-    const [st, pending, recent, cmts, agg, linkCnt, linkPending, sm] = await Promise.all([
+    const [st, pending, recent, cmts, agg, top, linkCnt, linkPending, sm] = await Promise.all([
       db.stats(dbx),
       db.listComments(dbx, { status: 'pending', limit: 5 }),
       db.listPosts(dbx, { status: 'all', page: 1, per: 6 }),
       db.listComments(dbx, { status: 'all', limit: 6 }),
       // 字数用文章元数据里的 word_count 求和（保存时算好），不必把全站正文读一遍
       db.dashboardAggregates(dbx, monthStart),
+      // 热门文章 TOP 5（按累计阅读数；只排元数据，不读正文）
+      db.topPosts(dbx, 5),
       db.countLinksByStatus(dbx).catch(() => ({ pending: 0, approved: 0, rejected: 0 })),
       db.listLinks(dbx, { status: 'pending' }).then((l) => l.slice(0, 5)).catch(() => []),
       db.settingsMap(dbx),   // 取永久链接规则，给下面两条列表补上文章地址
@@ -761,6 +774,11 @@ async function api(ctx, url, seg, method, envIn) {
         id: p.id, title: p.title, slug: p.slug, status: p.status,
         published_at: p.published_at, updated_at: p.updated_at,
         comments: p.comment_count || 0, url: postUrl(sm, p),
+      })),
+      // 热门文章 TOP 5：与「最近文章」同源（都已发布文章），只是排序口径不同
+      top_posts: top.map((p) => ({
+        id: p.id, title: p.title, slug: p.slug,
+        views: p.view_count || 0, url: postUrl(sm, p),
       })),
       recent_comments: cmts.map(tc),
       // 友链：待审数量 + 最近几条待审申请（仪表盘直接给出提醒与处理入口）

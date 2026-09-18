@@ -289,7 +289,7 @@ async function viewPosts() {
           <div class="cell-sub">${esc(purl)} ${cat ? ' · ' + cat : ''}</div></td>
         <td>${tags || '<span class="cell-sub">无标签</span>'}</td>
         <td style="white-space:nowrap">${fmtTime(p.published_at || p.updated_at)}</td>
-        <td style="white-space:nowrap">${p.comment_count || 0}</td>
+        <td style="white-space:nowrap">${p.view_count || 0} / ${p.comment_count || 0}</td>
         <td style="white-space:nowrap"><a class="btn sm" href="#/posts/${p.id}">编辑</a>${btnPub}${viewL}
           <button class="btn sm d" data-act="del" data-id="${p.id}" data-title="${esc(p.title)}">删除</button></td>
       </tr>`;
@@ -300,7 +300,7 @@ async function viewPosts() {
       <button class="btn sm" data-page="${page + 1}" ${page >= data.pages ? 'disabled' : ''}>下一页 ›</button>
     </div>` : `<div class="hint" style="margin-top:12px">共 ${data.total} 篇</div>`;
     listEl.innerHTML = `<div class="tbl-w"><table class="tbl"><thead><tr>
-      <th>标题</th><th>标签</th><th>发布时间</th><th>评论</th><th>操作</th></tr></thead>
+      <th>标题</th><th>标签</th><th>发布时间</th><th>阅读 / 评论</th><th>操作</th></tr></thead>
       <tbody>${rows}</tbody></table></div>${pager}`;
     listEl.querySelectorAll('button[data-act]').forEach((btn) => {
       btn.addEventListener('click', async () => {

@@ -16,11 +16,13 @@
 //    只能靠读取时就地兜底 + 恢复备份时补写。漏掉的症状极安静 ——
 //    页面会被当成文章混进首页、分类层级整个消失，且不报任何错。
 //
-// ── 已移除 ──
-//   PV / UV 全站统计（recordHit / pvSummary / pv_daily / pv_visitor）
-//   文章阅读数（incView / posts.view_count）
-//   两者都是「每次访问 +1」的高频写：Blob 没有原子自增，读改写会丢计数，
-//   与其显示一个不准的数字，不如干脆不做。
+// ── 统计：只保留「单篇文章阅读数」，不做全站 PV ──
+//   ★ 已移除：PV / UV 全站统计（recordHit / pvSummary / pv_daily / pv_visitor）。
+//     整站 PV 是「每次访问 +1」的高频写，Blob 没有原子自增，读改写必然丢计数；
+//     量越大越不准，索性不做（相关接口、后台看板与前端上报一并删除）。
+//   ★ 保留：posts.view_count（incView）—— 文章维度，写入频率低得多，
+//     且 mutate 自带模块级写锁 + 强制读最新，同实例内的并发写会被串行化。
+//     跨实例并发仍可能少记一次，个人博客量级下可以接受。
 import { bnNow, paginate, slugify, stripHtml } from './util.js';
 
 // 把数字或数字字符串统一成数字，避免 Blob 里存取一轮后 id 变字符串导致比较失败
@@ -122,6 +124,8 @@ function rowOf(p, catById, tags, pt) {
     updated_at: p.updated_at,
     published_at: p.published_at || null,
     comment_count: Number(p.comment_count) || 0,
+    // 阅读数：老数据 / 老备份里没有这个字段，缺省当 0
+    view_count: Number(p.view_count) || 0,
     word_count: Number(p.word_count) || 0,
     category: c ? {
       id: c.id, name: c.name, slug: c.slug,
@@ -224,6 +228,7 @@ export async function createPost(db, f) {
     updated_at: t,
     published_at: f.status === 'published' ? (f.published_at || t) : null,
     comment_count: 0,
+    view_count: 0,
     word_count: String(f.content_md || '').length,
   };
   await db.mutate('posts', [], (rows) => { rows.push(meta); return rows; });
@@ -299,6 +304,30 @@ export async function setPostStatus(db, id, status) {
 }
 
 // 上一篇 / 下一篇（按发布时间）
+// 阅读数 +1（前台 /api/view 调用）。
+// 语义与 D1 版一致：只认「已发布」的文章（`WHERE slug=? AND status='published'`），
+// 草稿 / 未命中一律不计数。
+// ⚠️ 并发下可能少记一次：Blob 没有 compare-and-swap，两处同时「读—改—写」会互相覆盖。
+//    同实例内的并发由 docdb 的模块级写锁串行化（mutate 会强制读最新副本），
+//    跨实例的窗口闭合不了 —— 个人博客的并发阅读概率极低，可接受。
+export async function incView(db, slug) {
+  const key = String(slug || '').slice(0, 120);
+  if (!key) return false;
+  // 页面（type='page'）不参与阅读计数：它不是「文章」，前台也不会给它发上报；
+  // 这里再挡一道，免得有人直接拿页面别名打接口把数字写进去。
+  const hit = (r) => r.slug === key && r.status === 'published' && r.type !== 'page';
+  // 先探一下：未命中就不写。省掉一次整表回写 —— 外站脚本乱打/打错 slug 是常态，
+  // 每次都把 db/posts.json 整个重写一遍既慢又没必要。
+  const rows = await db.read('posts');
+  if (!rows.some(hit)) return false;
+  await db.mutate('posts', [], (list) => {
+    const p = list.find(hit);
+    if (p) p.view_count = (Number(p.view_count) || 0) + 1;
+    return list;
+  });
+  return true;
+}
+
 export async function siblings(db, post) {
   if (!post.published_at) return { prev: null, next: null };
   const [posts, cats] = await Promise.all([db.read('posts'), db.read('categories')]);
@@ -596,18 +625,38 @@ export async function stats(db) {
 }
 
 // 仪表盘用的聚合（原先散在路由层当裸 SQL 写，收编到这里）
-//  - words        全部文章 Markdown 字数之和（用元数据里的 word_count，不读正文）
+//  - words        文章 Markdown 字数之和（用元数据里的 word_count，不读正文）
 //  - month_posts  本月新建文章数
 //  - month_comments 本月新评论数
 // monthStart 形如 '2026-09-01'，与 created_at 的北京时间字符串可直接比大小
+// ★ 统一按「文章」口径统计，排除独立页面 —— 与 stats() 的 posts / published 一致。
+//   （SQL 版的 SUM / COUNT 走全表、不按 type 过滤，页面字数和页面数会被算进去，
+//    于是「文章总数 3」旁边的「本月新增 4」「总字数含页面」会自相矛盾。）
 export async function dashboardAggregates(db, monthStart) {
   const [posts, cmts] = await Promise.all([db.read('posts'), db.read('comments')]);
   const since = String(monthStart || '');
+  const arts = posts.filter((p) => p.type !== 'page');
   return {
-    words: posts.reduce((n, p) => n + (Number(p.word_count) || 0), 0),
-    month_posts: posts.filter((p) => String(p.created_at || '') >= since).length,
+    words: arts.reduce((n, p) => n + (Number(p.word_count) || 0), 0),
+    month_posts: arts.filter((p) => String(p.created_at || '') >= since).length,
     month_comments: cmts.filter((c) => String(c.created_at || '') >= since).length,
   };
+}
+
+// 仪表盘「热门文章 TOP 5」：按累计阅读数排序。
+//  - 只排文章元数据，不读正文，开销与一页列表相当；
+//  - 排除页面（`type='page'`）：页面不计阅读数，放进来只会是一串 0；
+//  - **不过滤掉 0 阅读的文章**：前端要靠「有文章但全是 0」区分
+//    「还没有已发布文章」与「还没有阅读数据」两种情况。
+// 阅读数相同时按 id 倒序，与 SQL 版 `ORDER BY view_count DESC, id DESC` 一致。
+export async function topPosts(db, limit = 5) {
+  const { posts, tags, pt, catById } = await loadTaxonomy(db);
+  return posts
+    .filter((p) => p.status === 'published' && p.type !== 'page')
+    .sort((a, b) => (Number(b.view_count) || 0) - (Number(a.view_count) || 0)
+      || num(b.id) - num(a.id))
+    .slice(0, Math.max(1, Number(limit) || 5))
+    .map((p) => rowOf(p, catById, tags, pt));
 }
 
 // ---------- 友情链接 ----------
@@ -776,6 +825,8 @@ export async function restoreAll(db, data) {
     m.comment_count = cnt.get(num(m.id)) || 0;
     if (m.word_count == null) m.word_count = String(rawPosts[i].content_md || '').length;
     if (m.excerpt == null) m.excerpt = '';
+    // 阅读数：备份里带就原样留着（换站迁移时不该把已有阅读量清零），缺了才补 0
+    if (m.view_count == null) m.view_count = 0;
   });
 
   await db.write('settings', next);

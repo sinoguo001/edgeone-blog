@@ -1,9 +1,20 @@
-// 前台轻量脚本：友链申请与评论异步提交
-// 说明：原先这里还会往 /api/hit（全站 PV/UV）与 /api/view（文章阅读量）上报。
-// 那套统计已随存储改造一并移除 —— 数据层落在 Blob 上，没有原子自增，
-// 「读—改—写」在并发下必然丢计数，与其显示不准的数字不如不做。
+// 前台轻量脚本：文章阅读量上报、友链申请与评论异步提交
 (function () {
   'use strict';
+
+  // ---- 文章阅读量：只在文章详情页累加 ----
+  // slug 由服务端渲染进 <body data-slug="…">；独立页面（/p/<别名>）不带 slug，
+  // 所以页面不会被计进阅读数。异步上报、不等结果，失败也不影响阅读。
+  // 说明：整站 PV/UV 上报（/api/hit）已随存储改造移除 —— 那是「每次访问 +1」的
+  // 高频写，Blob 没有原子自增，并发下必然丢计数；文章阅读数写入频率低得多。
+  var slug = document.body && document.body.dataset.slug;
+  if (slug) {
+    fetch('/api/view', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ slug: slug }),
+    }).catch(function () {});
+  }
 
   // ---- 友链申请表单（/links 页）----
   var lkForm = document.getElementById('lk-form');
