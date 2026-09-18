@@ -15,6 +15,24 @@ let editor = null; // 当前编辑器实例
 let dirty = false; // 文章是否有未保存修改（全局守卫用）
 let draftSaver = null; // 由编辑器页注入的“保存草稿”函数（Ctrl+S 用）
 
+// ---------- 主题色：让后台配色跟着设置走 ----------
+// 后台 CSS 用的是 --ac 系列变量（前台是 --accent），此前只写死在 :root 里，
+// 结果设置页改了主题色后台纹丝不动，只有动态 favicon 变了——因为它由服务端
+// 直接取设置值渲染，压根不走 CSS 变量。故后台登录后拉一次设置并写到 :root 上。
+// 混白比例与服务端 site.js 的 accentVars() 对齐，前后台观感才一致。
+function applyAccent(hex) {
+  const c = /^#[0-9a-fA-F]{6}$/.test(String(hex || '')) ? hex : '#2563eb';
+  const r = parseInt(c.slice(1, 3), 16), g = parseInt(c.slice(3, 5), 16), b = parseInt(c.slice(5, 7), 16);
+  const mix = (t) => `rgb(${Math.round(r + (255 - r) * t)},${Math.round(g + (255 - g) * t)},${Math.round(b + (255 - b) * t)})`;
+  const st = document.documentElement.style;
+  st.setProperty('--ac', c);
+  st.setProperty('--ac-soft', mix(0.94));
+  st.setProperty('--ac-soft-2', mix(0.9));
+  st.setProperty('--ac-line', mix(0.86));
+  st.setProperty('--ac-ring', `rgba(${r},${g},${b},.12)`);
+  return c;
+}
+
 // ---------- 邮件服务商预设（与 functions/_lib/mail.js 的 MAIL_PROVIDERS 对应） ----------
 // 选服务商后自动填服务器 / 端口 / 加密方式，并把「授权码」提示显示出来
 // ports / secures = 该服务商**实际开放**的端口与加密方式（按各家官方帮助文档核对，2026-09）。
@@ -148,13 +166,11 @@ function viewSetup() {
   </div></div>`;
   const logoEl = app.querySelector('#setup-logo');
   const titleIn = app.querySelector('#st [name="site_title"]');
-  const accentIn = app.querySelector('#st [name="accent"]');
+  // 预览方块底色固定品牌蓝（与实际页头 / favicon 一致），只有站名首字会跟着输入变
   const syncLogo = () => {
     logoEl.textContent = (titleIn.value || '').trim()[0] || '云';
-    logoEl.style.background = accentIn.value || '#2563eb';
   };
   titleIn.addEventListener('input', syncLogo);
-  accentIn.addEventListener('input', syncLogo);
   syncLogo();
   app.querySelector('#st').addEventListener('submit', async (ev) => {
     ev.preventDefault();
@@ -278,6 +294,7 @@ async function viewPosts() {
       const cat = p.category ? `<a class="cell-sub" href="#/categories">${esc(p.category.name)}</a>` : '';
       const tags = (p.tags || []).map((t) => `<span class="tag-mini">${esc(t.name)}</span>`).join('');
       const st = p.status === 'published' ? '<span class="st published">已发布</span>' : '<span class="st draft">草稿</span>';
+      const lockTag = p.locked ? '<span class="tag-mini lock">🔒 加密</span>' : '';
       const btnPub = p.status === 'published'
         ? `<button class="btn sm g" data-act="unpub" data-id="${p.id}" data-slug="${esc(p.slug)}">下线</button>`
         : `<button class="btn sm ok" data-act="pub" data-id="${p.id}">发布</button>`;
@@ -285,7 +302,7 @@ async function viewPosts() {
       const purl = p.url || ('/post/' + p.slug);
       const viewL = p.status === 'published' ? `<a class="btn sm g" href="${esc(purl)}" target="_blank" rel="noopener">查看</a>` : '';
       return `<tr>
-        <td><div class="cell-title">${esc(p.title)}${st}</div>
+        <td><div class="cell-title">${esc(p.title)}${st}${lockTag}</div>
           <div class="cell-sub">${esc(purl)} ${cat ? ' · ' + cat : ''}</div></td>
         <td>${tags || '<span class="cell-sub">无标签</span>'}</td>
         <td style="white-space:nowrap">${fmtTime(p.published_at || p.updated_at)}</td>
@@ -351,6 +368,8 @@ async function viewEditor(id, kind = 'post') {
   let post = null;
   const cats = isPage ? [] : (await API.get('/categories').catch(() => []));
   if (id) post = await API.get('/posts/' + id); // 单篇读取：后端路由为 GET /api/posts/:id
+  // 阅读密码：明文回填显示 —— 博主自己看得见，省得每次重设都要再输一遍
+  const pw = String(post?.password || '');
 
   shell(`
   <div class="page-head"><h1>${id ? (isPage ? '编辑页面' : '编辑文章') : (isPage ? '新建页面' : '写文章')}</h1>
@@ -365,6 +384,8 @@ async function viewEditor(id, kind = 'post') {
       <span class="f2">标签 <input id="e-tags" placeholder="多个标签用逗号分隔" value="${esc((post?.tags || []).map((t) => t.name).join(',') || '')}"></span>`}
       <span class="f2">别名 <input id="e-slug" placeholder="留空自动生成（英文数字 -）" value="${esc(post?.slug || '')}">
         <a id="e-slug-rand" href="javascript:;" title="随机生成">🎲</a></span>
+      ${isPage ? '' : `<span class="f2"><label><input type="checkbox" id="e-lock"${pw ? ' checked' : ''}> 加密</label>
+        <input id="e-pass" type="text" placeholder="阅读密码" value="${esc(pw)}"${pw ? '' : ' disabled'} style="max-width:150px" autocomplete="off"></span>`}
       ${isPage ? `<span class="f2"><label><input type="checkbox" id="e-innav" ${(post ? Number(post.in_nav) : 1) ? 'checked' : ''}> 在站点导航显示</label></span>`
     : `<span class="f2">封面 <input type="file" id="e-cover" accept="image/*" style="max-width:190px">
         <span id="e-cover-prev" style="display:${post?.cover_key ? '' : 'none'}"><img src="/media/${esc(post?.cover_key || '')}" style="height:34px;border-radius:6px;vertical-align:middle">
@@ -417,6 +438,18 @@ async function viewEditor(id, kind = 'post') {
   const coverDel = view().querySelector('#e-cover-del');
   if (coverDel) coverDel.addEventListener('click', () => { coverKey = null; coverPrev(); });
 
+  // 加密开关：勾上才让填密码（明文输入，只输一遍）；取消勾选立刻禁用并清空
+  const lockEl = view().querySelector('#e-lock');
+  const passEl = view().querySelector('#e-pass');
+  if (lockEl && passEl) {
+    const syncLock = () => {
+      passEl.disabled = !lockEl.checked;
+      if (!lockEl.checked) passEl.value = '';
+      else passEl.focus();
+    };
+    lockEl.addEventListener('change', syncLock);
+  }
+
   const updateStatus = (st) => {
     view().querySelector('#e-status').textContent = st === 'published' ? '当前状态：已发布' : '当前状态：草稿（仅你可见）';
     view().querySelector('#e-status').style.color = st === 'published' ? '#15803d' : '#b45309';
@@ -427,7 +460,7 @@ async function viewEditor(id, kind = 'post') {
   dirty = false;
   const markDirty = () => { dirty = true; };
   // 只给页面上真实存在的元素绑（页面编辑器没有分类 / 标签）
-  ['#e-title', '#e-tags', '#e-slug', '#e-cat', '#e-innav'].forEach((s) => {
+  ['#e-title', '#e-tags', '#e-slug', '#e-cat', '#e-innav', '#e-lock', '#e-pass'].forEach((s) => {
     const em = view().querySelector(s);
     if (em) em.addEventListener('input', markDirty);
   });
@@ -442,6 +475,11 @@ async function viewEditor(id, kind = 'post') {
     const tagEl = view().querySelector('#e-tags');   // 页面没有标签 / 分类，取不到就留空
     const catEl = view().querySelector('#e-cat');
     const navEl = view().querySelector('#e-innav');
+    const lkEl = view().querySelector('#e-lock');
+    const psEl = view().querySelector('#e-pass');
+    const useLock = !!(lkEl && lkEl.checked);
+    // 勾了加密却没填密码：直接拦下，否则会存成空密码（等于没加密）还看不出来
+    if (useLock && !(psEl && psEl.value.trim())) throw new Error('勾选加密后请填写阅读密码');
     const tags = tagEl ? tagEl.value.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean) : [];
     return {
       title,
@@ -451,6 +489,8 @@ async function viewEditor(id, kind = 'post') {
       tags,
       cover_key: coverKey,
       excerpt: '',
+      // 只有文章有加密开关：页面不传 password，后端就不会覆盖已有值
+      ...(isPage ? {} : { password: useLock ? psEl.value.trim() : '' }),
       // type / in_nav 只有页面才提交：文章不传，后端就不会改动它
       ...(isPage ? { type: 'page', in_nav: navEl ? (navEl.checked ? 1 : 0) : 1 } : {}),
     };
@@ -1457,7 +1497,7 @@ async function viewSettings(tabArg) {
           <div class="field">
             <label>页头 Logo（建议高度 ≥ 72px 的 PNG / WebP，透明底更佳）</label>
             <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-              <span id="logo-prev" style="width:38px;height:38px;border-radius:9px;background:var(--accent);color:#fff;display:inline-flex;align-items:center;justify-content:center;font-weight:800;flex:none;overflow:hidden">云</span>
+              <span id="logo-prev" style="width:38px;height:38px;border-radius:9px;background:#2563eb;color:#fff;display:inline-flex;align-items:center;justify-content:center;font-weight:800;flex:none;overflow:hidden">云</span>
               <input class="inp" id="s-logo_image" placeholder="留空则使用默认：站点名称首字方块" style="flex:1;min-width:190px">
               <label class="btn" style="cursor:pointer;margin:0">上传<input type="file" id="logo-file" accept="image/*" hidden></label>
               <button class="btn" type="button" id="logo-clear">清除</button>
@@ -1466,13 +1506,13 @@ async function viewSettings(tabArg) {
           <div class="field">
             <label>浏览器标签图标 Favicon（建议正方形，≥ 64×64）</label>
             <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-              <span id="fav-prev" style="width:38px;height:38px;border-radius:9px;background:var(--accent);color:#fff;display:inline-flex;align-items:center;justify-content:center;font-weight:800;flex:none;overflow:hidden">云</span>
+              <span id="fav-prev" style="width:38px;height:38px;border-radius:9px;background:#2563eb;color:#fff;display:inline-flex;align-items:center;justify-content:center;font-weight:800;flex:none;overflow:hidden">云</span>
               <input class="inp" id="s-favicon_image" placeholder="留空则自动沿用 Logo，再无则用默认首字图标" style="flex:1;min-width:190px">
               <label class="btn" style="cursor:pointer;margin:0">上传<input type="file" id="fav-file" accept="image/*" hidden></label>
               <button class="btn" type="button" id="fav-clear">清除</button>
             </div>
           </div>
-          <p class="hint" style="margin-bottom:0">上传的图片存入 R2，地址会自动填入左侧输入框，<b>需点下方「保存全部设置」才生效</b>。两者都留空时，页头与标签页图标会显示默认的首字方块（改站点名称或主题色会自动跟随）。</p>
+          <p class="hint" style="margin-bottom:0">上传的图片存入本站 Blob 存储，地址会自动填入左侧输入框，<b>需点下方「保存全部设置」才生效</b>。两者都留空时，页头与标签页图标会显示默认的首字方块：底色固定为品牌蓝（不随主题色变化），方块里的字取站点名称首字（改站点名称会自动跟随）。</p>
         </div>
         <div class="card">
           <div class="sec-title">对外订阅与收录</div>
@@ -1671,6 +1711,7 @@ async function viewSettings(tabArg) {
   set('s-site_title', s.site_title); set('s-site_subtitle', s.site_subtitle);
   set('s-author_name', s.author_name); set('s-seo_desc', s.seo_desc);
   set('s-accent', s.accent || '#2563eb'); set('s-per_page', s.per_page || '8');
+  applyAccent(s.accent || '#2563eb');
   set('s-footer_text', s.footer_text);
   set('s-beian', s.beian);
   set('s-copyright', s.copyright);
@@ -1934,6 +1975,10 @@ async function viewSettings(tabArg) {
   cpIn.addEventListener('input', cpSync);
   cpSync();
 
+  // ---- 主题色：边选边变（只改 :root 变量，不写库；未保存刷新会回到已保存值）----
+  const accentIn = v.querySelector('#s-accent');
+  accentIn.addEventListener('input', () => applyAccent(accentIn.value));
+
   // ---- 站点图标：预览 / 上传 / 清除 ----
   const logoIn = v.querySelector('#s-logo_image');
   const favIn = v.querySelector('#s-favicon_image');
@@ -2088,6 +2133,8 @@ async function boot() {
     return;
   }
   if (!state.installed) { viewSetup(); return; }
+  // 后台配色跟随主题色：任一页面刷新后都重新取一次，不必先进设置页
+  API.get('/settings').then((s) => applyAccent(s && s.accent)).catch(() => {});
   window.addEventListener('hashchange', router);
   await router();
 }

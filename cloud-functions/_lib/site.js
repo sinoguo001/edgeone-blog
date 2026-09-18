@@ -25,6 +25,18 @@ function avatarUrl(s, email, size = 80) {
 const ACCENT = '#2563eb';
 export function accentOf(s) { return isHexColor(s.get('accent')) ? s.get('accent') : ACCENT; }
 
+// 主题色配套色：主色一改，浅底 / 极浅底 / 主色上的文字色必须跟着变，
+// 否则会出现「红按钮配蓝底」「深色主色上写白字看不清」这类半变不变的样子。
+// 混白比例与后台 applyAccent 保持一致，两边观感才统一。
+export function accentVars(hex) {
+  const c = isHexColor(hex) ? hex : ACCENT;
+  const r = parseInt(c.slice(1, 3), 16), g = parseInt(c.slice(3, 5), 16), b = parseInt(c.slice(5, 7), 16);
+  const mix = (t) => `rgb(${Math.round(r + (255 - r) * t)},${Math.round(g + (255 - g) * t)},${Math.round(b + (255 - b) * t)})`;
+  // sRGB 相对亮度：亮色主色上用深色字，暗色主色上用白字
+  const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  return `--accent:${c};--accent-soft:${mix(0.92)};--tint:${mix(0.94)};--on-accent:${lum > 0.62 ? '#1f2937' : '#fff'}`;
+}
+
 // 当前激活主题的样式表外链；内置 default 主题无独立文件，返回空
 export function themeLink(s, base = '') {
   const id = (s.get('active_theme') || '').trim();
@@ -57,7 +69,7 @@ img{max-width:100%}
 .hd{background:var(--card);border-bottom:1px solid var(--line)}
 .hd-in{display:flex;align-items:center;gap:18px;flex-wrap:wrap;padding:14px 0}
 .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:20px;color:var(--text);margin-right:auto}
-.brand-mark{width:34px;height:34px;border-radius:9px;background:var(--accent);color:var(--on-accent);display:inline-flex;align-items:center;justify-content:center;font-weight:800}
+.brand-mark{width:34px;height:34px;border-radius:9px;background:#2563eb;color:#fff;display:inline-flex;align-items:center;justify-content:center;font-weight:800}
 .brand-img{height:36px;width:auto;max-width:170px;object-fit:contain;display:block}
 .brand small{display:block;font-weight:400;font-size:12px;color:var(--muted);line-height:1.2}
 .nav{display:flex;gap:4px;flex-wrap:wrap;align-items:center}
@@ -146,6 +158,21 @@ img{max-width:100%}
 .art-body table{border-collapse:collapse;margin:1.2em 0;width:100%;font-size:15px}
 .art-body th,.art-body td{border:1px solid var(--line);padding:8px 12px}
 .art-body th{background:var(--tint)}
+/* 加密文章：列表里的锁标记与提示 */
+.lock-mark{font-size:15px;margin-right:4px}
+.lock-note{color:var(--muted)!important;font-style:normal}
+/* 密码页 */
+.lock-box{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:34px 30px;text-align:center;margin-top:6px}
+.lock-ico{font-size:36px;line-height:1;margin-bottom:10px}
+.lock-tip{color:var(--text-soft);font-size:15px;margin:0 0 18px}
+.lock-form{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+.lock-inp{border:1px solid var(--line);background:var(--bg);color:var(--text);border-radius:10px;
+  padding:10px 14px;font-size:15px;width:min(260px,70vw);outline:none}
+.lock-inp:focus{border-color:var(--accent)}
+.lock-inp.bad{border-color:var(--danger,#dc2626)}
+.lock-btn{background:var(--accent);color:var(--on-accent);border:0;border-radius:10px;padding:10px 22px;
+  font-size:15px;cursor:pointer}
+.lock-err{color:var(--danger,#dc2626);font-size:13.5px;margin:14px 0 0}
 /* 上/下一篇 */
 .pn{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:22px}
 .pn a{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 18px;font-size:14px}
@@ -249,6 +276,9 @@ textarea.lf-input{min-height:86px;resize:vertical;line-height:1.7}
 `;
 
 // ---------- 站点标识（logo / favicon）----------
+// 品牌蓝：默认图标（页头首字方块 + 动态 favicon）的固定底色。
+// 只认用户上传的 logo_image / favicon_image，主题色改了它不动。
+export const BRAND_BLUE = '#2563eb';
 // 图标字符：站点标题首字，取不到时回退品牌字「云」，保证各页面（含 404）永远一致。
 export function brandChar(s) {
   return (String(s.get('site_title') || '').trim()[0] || '云');
@@ -258,9 +288,16 @@ function brandMark(s) {
   const img = String(s.get('logo_image') || '').trim();
   return img ? `<img class="brand-img" src="${esc(img)}" alt="">` : `<span class="brand-mark">${esc(brandChar(s))}</span>`;
 }
+// 动态图标的版本号：每次改 faviconSvg 的画法（换底色、换形状）都要 +1。
+// 它进 URL，URL 一变浏览器与 CDN 就都不会再拿旧缓存 —— 否则改了颜色，浏览器标签里
+// 那张旧图能赖上几小时（浏览器对 favicon 有独立缓存，Ctrl+F5 都刷不掉）。
+export const FAVICON_VER = '2';
 // 自定义图标地址：favicon 优先用 favicon_image，没设则复用 logo_image，都没设则用动态 /favicon.svg
 export function faviconHref(s) {
-  return String(s.get('favicon_image') || s.get('logo_image') || '/favicon.svg').trim();
+  const custom = String(s.get('favicon_image') || s.get('logo_image') || '').trim();
+  if (custom) return custom; // 用户自己的图片：原样用，不加参数
+  // 默认动态图标：把版本号与首字拼进 URL，改画法或改站名都能立刻甩掉旧缓存
+  return `/favicon.svg?v=${FAVICON_VER}-${encodeURIComponent(brandChar(s))}`;
 }
 export function faviconMime(href) {
   return /\.svg(\?|$)/i.test(href) ? 'image/svg+xml'
@@ -269,11 +306,12 @@ export function faviconMime(href) {
     : /\.webp(\?|$)/i.test(href) ? 'image/webp'
     : /\.ico(\?|$)/i.test(href) ? 'image/x-icon' : '';
 }
-// 动态 favicon：与页头 .brand-mark 同源（同色、同字），改站点名或主题色自动跟随
+// 动态 favicon：与页头 .brand-mark 同源（同字、同底色）。
+// 底色固定品牌蓝，不跟主题色走 —— 换了主题色标签图标不会跟着变色，只有用户上传自定义图标才变。
 export function faviconSvg(s) {
   const ch = esc(brandChar(s));
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-<rect width="64" height="64" rx="14" fill="${accentOf(s)}"/>
+<rect width="64" height="64" rx="14" fill="${BRAND_BLUE}"/>
 <text x="32" y="33" text-anchor="middle" dominant-baseline="central" font-size="38" font-weight="700"
  fill="#fff" font-family="system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif">${ch}</text>
 </svg>`;
@@ -329,9 +367,10 @@ export function layout(s, o) {
 <meta name="description" content="${esc(desc)}">
 <link rel="icon" href="${esc(faviconHref(s))}"${faviconMime(faviconHref(s)) ? ` type="${faviconMime(faviconHref(s))}"` : ''}>
 <link rel="alternate" type="application/rss+xml" title="${esc(title)}" href="/rss.xml">
-<style>:root{--accent:${accent}}${THEME_VARS}${FRONT_CSS}${codeThemeCss(s.get('code_theme'))}</style>
+<style>${THEME_VARS}:root{${accentVars(accent)}}${FRONT_CSS}${codeThemeCss(s.get('code_theme'))}</style>
 ${themeLink(s)}
-<!-- 前台脚本：友链申请与评论异步提交 -->
+<!-- 前台脚本：文章页用它上报阅读量，友链申请与评论异步提交 -->
+
 <script src="/js/site.js" defer></script>
 </head>
 <body data-slug="${o.bodySlug || ''}">
@@ -365,13 +404,17 @@ function catChips(list, base = '/category') {
 // p 之后可传设置 Map s；传了就用「永久链接」规则生成地址，否则退回 /post/:slug
 function postCard(p, s) {
   const url = esc(s ? postUrl(s, p) : '/post/' + p.slug);
-  const cover = p.cover_key
-    ? `<div class="pc-cover"><a href="${url}"><img src="/media/${esc(p.cover_key)}" alt="" loading="lazy"></a></div>` : '';
-  const cat = p.category ? `<a href="${esc(catUrl(p.category))}">${esc(p.category.name)}</a>` : '';
+  // 加密文章：列表、搜索、RSS 都只看得到标题 —— 摘要 / 标签 / 封面都不外露
+  const locked = !!p.locked;
   // 摘要：文章元数据里已存好（保存时由 db 层算），列表页不再携带正文；
   // 兜一层空串，避免个别老数据缺 excerpt 时 stripHtml(undefined) 抛错。
-  const excerpt = p.excerpt || stripHtml(p.content_html || '').slice(0, 260);
-  const tags = (p.tags || []).map((t) => `<a class="tag-chip" href="/tag/${esc(t.slug)}">${esc(t.name)}</a>`).join('');
+  const excerpt = locked ? '' : (p.excerpt || stripHtml(p.content_html || '').slice(0, 260));
+  const tags = locked ? '' : (p.tags || []).map((t) => `<a class="tag-chip" href="/tag/${esc(t.slug)}">${esc(t.name)}</a>`).join('');
+  // 分类仍可显示（不泄露正文内容）
+  const cat = p.category ? `<a href="${esc(catUrl(p.category))}">${esc(p.category.name)}</a>` : '';
+  // 封面同样不外露：图里常常就有正文内容
+  const cover = (!locked && p.cover_key)
+    ? `<div class="pc-cover"><a href="${url}"><img src="/media/${esc(p.cover_key)}" alt="" loading="lazy"></a></div>` : '';
   return `<article class="pc${cover ? '' : ' no-cover'}"><div>
     <div class="pc-meta">
       <time>${fmtDate(p.published_at || p.created_at)}</time>
@@ -379,8 +422,9 @@ function postCard(p, s) {
       <span class="dot">·</span><span>阅读 ${p.view_count || 0}</span>
       <span class="dot">·</span><span>${p.comment_count || 0} 评论</span>
     </div>
-    <h2 class="pc-title"><a href="${url}">${esc(p.title)}</a></h2>
-    ${excerpt ? `<p class="pc-excerpt">${esc(excerpt)}</p>` : ''}
+    <h2 class="pc-title">${locked ? '<span class="lock-mark">🔒</span>' : ''}<a href="${url}">${esc(p.title)}</a></h2>
+    ${locked ? '<p class="pc-excerpt lock-note">本文已加密，需输入密码访问</p>'
+      : (excerpt ? `<p class="pc-excerpt">${esc(excerpt)}</p>` : '')}
     ${tags ? `<div class="pc-tags">${tags}</div>` : ''}
   </div>${cover}</article>`;
 }
@@ -480,6 +524,29 @@ export function renderArticle(s, post, extra) {
     ${pnHtml}
     ${renderComments(s, post, extra.comments, extra.cfg)}`;
   return layout(s, { content, title: post.title, active: 'home', bodySlug: post.slug });
+}
+
+// ---------- 加密文章的密码页 ----------
+// 只给标题 + 密码框：正文、标签、评论、上下篇、版权一律不输出，
+// bodySlug 留空，前端也就不会上报阅读量（阅读数只统计能看正文的文章）。
+export function renderLocked(s, post, wrong) {
+  const url = postUrl(s, post);
+  const content = `
+    <p class="crumb"><a href="/">首页</a> / 正文</p>
+    <article class="article">
+      <h1>${esc(post.title)}</h1>
+      <div class="lock-box">
+        <div class="lock-ico">🔒</div>
+        <p class="lock-tip">本文已加密，请输入访问密码</p>
+        <form class="lock-form" method="post" action="${esc(url)}">
+          <input class="lock-inp${wrong ? ' bad' : ''}" type="password" name="post_password"
+            placeholder="访问密码" autocomplete="current-password" autofocus>
+          <button class="lock-btn" type="submit">解锁阅读</button>
+        </form>
+        ${wrong ? '<p class="lock-err">密码不正确，请重试</p>' : ''}
+      </div>
+    </article>`;
+  return layout(s, { content, title: post.title, active: 'home', bodySlug: '', desc: '' });
 }
 
 // 独立页面（Ver 0.4）：只有标题与正文 —— 不带发布时间、分类、标签、评论、
@@ -772,7 +839,8 @@ ${body}
 
 // 浏览器直接打开 /rss.xml 时展示的排版页
 export async function rssHtml(env, s, origin) {
-  const data = await db.listPosts(env.DB, { status: 'published', per: 50 });
+  // 加密文章不进 RSS：订阅是明文分发，收进去等于把密码绕过去
+  const data = await db.listPosts(env.DB, { status: 'published', unlockedOnly: true, per: 50 });
   const now = bnNow(); // UTC+8 'YYYY-MM-DD HH:MM:SS'
   const siteTitle = s.get('site_title') || '云尚博客';
   const items = data.items.map((p) => {
@@ -837,7 +905,8 @@ export async function sitemapHtml(env, s, origin) {
 
 // ---------- XML（给阅读器与搜索引擎的标准数据）----------
 export async function rssXml(env, s, origin) {
-  const data = await db.listPosts(env.DB, { status: 'published', per: 50 });
+  // 加密文章不进 RSS：订阅是明文分发，收进去等于把密码绕过去
+  const data = await db.listPosts(env.DB, { status: 'published', unlockedOnly: true, per: 50 });
   const items = data.items.map((p) => {
     const body = (p.content_html || '').replace(/\]\]>/g, ']]&gt;');
     const cat = p.category ? `<category>${esc(p.category.name)}</category>` : '';
@@ -893,7 +962,7 @@ export function previewDoc(s, post, origin = '') {
 <base href="${esc(origin)}/">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>预览</title>
-<style>:root{--accent:${accentOf(s)}}${THEME_VARS}
+<style>${THEME_VARS}:root{${accentVars(accentOf(s))}}
 body{margin:0;background:var(--bg);color:var(--text);font:16px/1.8 var(--font-body)}
 .wrap{max-width:820px;margin:0 auto;padding:28px 22px}
 h1{font-size:30px;line-height:1.4;margin:0 0 6px}

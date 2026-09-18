@@ -17,7 +17,8 @@
 //   两个入口互不引用，逻辑也只有一份，不会各改各的。
 // ============================================================
 import { json, err, esc, bnNow, readJson, mimeOfExt, isHexColor, isEmail, stripHtml, wantsFeedHtml, readCookie, bgTask,
-  normalizePermalink, permalinkOf, permalinkRegex, postUrl, pageUrl, catUrl, permalinkVarsMatch } from './util.js';
+  normalizePermalink, permalinkOf, permalinkRegex, postUrl, pageUrl, catUrl, permalinkVarsMatch,
+  sha256Hex, safeEqual, postPassCookie } from './util.js';
 // EdgeOne Makers 适配层：平台没有 D1 / R2 / cloudflare:sockets，
 // 这里统一换成 Blob 存储（对象存储 + 文档库）与 Node net/tls 的等价实现。
 import { resolveEnv } from './store/index.js';
@@ -122,12 +123,16 @@ async function handle(ctx) {
   if (path === '/robots.txt') {
     return new Response(site.robotsTxt(url.origin), { headers: { 'content-type': 'text/plain; charset=utf-8' } });
   }
-  // 动态 favicon：与页头 logo 同源（同字同色），改站点名或主题色自动跟随；
+  // 动态 favicon：与页头 logo 同源（同字、同底色），底色固定品牌蓝。
+  // ⚠️ 缓存时间必须压到很短：favicon 由浏览器**单独请求**、有自己的缓存，改了颜色
+  // 连 Ctrl+F5 都刷不掉；边缘节点也会跟着 Cache-Control 缓存它（EdgeOne 默认遵循源站
+  // 的 Cache-Control）。这里给 60 秒，主力机制是站点 link 里的 ?v= 版本号
+  // （见 site.faviconHref：画法一改就把版本号 +1，URL 一变两层缓存都作废）。
   // 后台若上传了自定义 favicon / logo，页面 link 会直接指向图片，不再走这里。
   if (path === '/favicon.svg') {
     const s = await db.settingsMap(env.DB);
     return new Response(site.faviconSvg(s), {
-      headers: { 'content-type': 'image/svg+xml; charset=utf-8', 'cache-control': 'public, max-age=3600' },
+      headers: { 'content-type': 'image/svg+xml; charset=utf-8', 'cache-control': 'public, max-age=60' },
     });
   }
   // 判别函数见 util.wantsFeedHtml（浏览器 Accept 普遍含 application/xml，不能用它反推阅读器）
@@ -159,6 +164,7 @@ async function front(ctx, url, seg, method, path, envIn) {
   // 已装配好的 env 由 handle 传入（同一请求复用同一个 DocDb 与其读缓存）；
   // 单独调用时（本地测试等）兜底自己装配一次。
   const env = envIn || resolveEnv(ctx.env);
+  const { request } = ctx;
   const s = await db.settingsMap(env.DB);
   // 导航里的独立页面：按请求单独查好塞进 s（s 是本请求新建的 Map，不会串到别的请求），
   // layout() 再从 s 里取，避免用模块级全局变量导致并发请求互相覆盖。
@@ -209,12 +215,15 @@ async function front(ctx, url, seg, method, path, envIn) {
     const data = await db.listPosts(env.DB, { status: 'published', cat: cat.slug, page, per });
     const itemsHtml = data.items.map((p) => {
       const u = esc(postUrl(s, p));   // 永久链接：随「文章设置」里的规则变化
-      const cover = p.cover_key ? `<div class="pc-cover"><a href="${u}"><img src="/media/${esc(p.cover_key)}" alt="" loading="lazy"></a></div>` : '';
-      const tags = (p.tags || []).map((t) => `<a class="tag-chip" href="/tag/${esc(t.slug)}">${esc(t.name)}</a>`).join('');
+      // 加密文章：摘要 / 标签 / 封面都不外露（封面图里常常就有正文内容）
+      const locked = !!p.locked;
+      const cover = (!locked && p.cover_key) ? `<div class="pc-cover"><a href="${u}"><img src="/media/${esc(p.cover_key)}" alt="" loading="lazy"></a></div>` : '';
+      const tags = locked ? '' : (p.tags || []).map((t) => `<a class="tag-chip" href="/tag/${esc(t.slug)}">${esc(t.name)}</a>`).join('');
       return `<article class="pc${cover ? '' : ' no-cover'}"><div>
-        <div class="pc-meta"><time>${esc(p.published_at || '').slice(0, 10)}</time></div>
-        <h2 class="pc-title"><a href="${u}">${esc(p.title)}</a></h2>
-        ${p.excerpt ? `<p class="pc-excerpt">${esc(p.excerpt)}</p>` : ''}
+        <div class="pc-meta"><time>${esc(p.published_at || '').slice(0, 10)}</time><span class="dot">·</span><span>阅读 ${p.view_count || 0}</span></div>
+        <h2 class="pc-title">${locked ? '<span class="lock-mark">🔒</span>' : ''}<a href="${u}">${esc(p.title)}</a></h2>
+        ${locked ? '<p class="pc-excerpt lock-note">本文已加密，需输入密码访问</p>'
+    : (p.excerpt ? `<p class="pc-excerpt">${esc(p.excerpt)}</p>` : '')}
         ${tags ? `<div class="pc-tags">${tags}</div>` : ''}</div>${cover}</article>`;
     }).join('');
     // 顶级分类页顶上列出它的二级分类入口；二级分类页则给出返回上级的链接
@@ -248,8 +257,8 @@ async function front(ctx, url, seg, method, path, envIn) {
     if (!tag) return html(site.render404(s), 404);
     const data = await db.listPosts(env.DB, { status: 'published', tag: slug, page, per });
     const itemsHtml = data.items.map((p) => `<article class="pc no-cover"><div>
-      <div class="pc-meta"><time>${esc(p.published_at || '').slice(0, 10)}</time></div>
-      <h2 class="pc-title"><a href="${esc(postUrl(s, p))}">${esc(p.title)}</a></h2></div></article>`).join('');
+      <div class="pc-meta"><time>${esc(p.published_at || '').slice(0, 10)}</time><span class="dot">·</span><span>阅读 ${p.view_count || 0}</span></div>
+      <h2 class="pc-title">${p.locked ? '<span class="lock-mark">🔒</span>' : ''}<a href="${esc(postUrl(s, p))}">${esc(p.title)}</a></h2></div></article>`).join('');
     const makeUrl = (n) => (n <= 1 ? `/tag/${slug}` : `/tag/${slug}/page/${n}`);
     return html(site.renderListPage(s, {
       head: `标签：${tag.name}`, active: 'tags', title: tag.name, desc: `共 ${data.total} 篇相关文章`,
@@ -288,9 +297,10 @@ async function front(ctx, url, seg, method, path, envIn) {
       const data = await db.listPosts(env.DB, { status: 'published', q, per: 20 });
       total = data.total;
       itemsHtml = data.items.map((p) => `<article class="pc no-cover"><div>
-        <div class="pc-meta"><time>${esc(p.published_at || '').slice(0, 10)}</time></div>
-        <h2 class="pc-title"><a href="${esc(postUrl(s, p))}">${esc(p.title)}</a></h2>
-        ${p.excerpt ? `<p class="pc-excerpt">${esc(p.excerpt)}</p>` : ''}</div></article>`).join('');
+        <div class="pc-meta"><time>${esc(p.published_at || '').slice(0, 10)}</time><span class="dot">·</span><span>阅读 ${p.view_count || 0}</span></div>
+        <h2 class="pc-title">${p.locked ? '<span class="lock-mark">🔒</span>' : ''}<a href="${esc(postUrl(s, p))}">${esc(p.title)}</a></h2>
+        ${p.locked ? '<p class="pc-excerpt lock-note">本文已加密，需输入密码访问</p>'
+    : (p.excerpt ? `<p class="pc-excerpt">${esc(p.excerpt)}</p>` : '')}</div></article>`).join('');
     }
     return html(site.renderListPage(s, {
       head: q ? `“${esc(q)}” 的搜索结果` : '搜索', active: '', title: '搜索', q,
@@ -312,7 +322,8 @@ async function front(ctx, url, seg, method, path, envIn) {
 
   // 文章页：按「永久链接」规则解析（放在所有固定路由之后，保证 /archive、/search 等
   // 系统路径永远优先；命中不了再兜底旧地址 /post/:slug(.html) 并 301 到当前规范地址）
-  const pr = await permalinkRoute(env, s, path, user, url.origin);
+  // 传 request / method：加密文章要读表单里的密码、读解锁 Cookie
+  const pr = await permalinkRoute(env, s, path, user, url.origin, request, method);
   if (pr) return pr;
 
   // 404
@@ -326,7 +337,7 @@ const redirect301 = (loc) => new Response(null, {
 // 路径可能是百分号编码（中文别名）；解码失败就按原样匹配，不能让异常变成 500
 const safeDecode = (p) => { try { return decodeURIComponent(p); } catch (e) { return p; } };
 
-async function permalinkRoute(env, s, path, user, origin) {
+async function permalinkRoute(env, s, path, user, origin, request, method) {
   const p0 = safeDecode(path);
   const { re, keys } = permalinkRegex(permalinkOf(s));
   const m = re.exec(p0);
@@ -355,6 +366,27 @@ async function permalinkRoute(env, s, path, user, origin) {
   if (post.status !== 'published' && !user) return html(site.render404(s), 404);
   if (post.status !== 'published') {
     post.content_html = `<div class="empty" style="padding:14px;margin-bottom:14px">此文章为<b>草稿</b>，仅你可见 · <a href="/admin#/posts/${post.id}">回后台编辑</a></div>` + post.content_html;
+  }
+  // ---------- 加密文章 ----------
+  // 博主本人免密；访客要输密码，输对了写 Cookie，之后同浏览器直接放行。
+  // Cookie 里只存密码的 SHA-256，不下发明文；比对走恒定时间比较。
+  if (String(post.password || '') && !user) {
+    const okHash = await sha256Hex(post.password);
+    const ck = readCookie(request, postPassCookie(post.id));
+    if (!(ck && safeEqual(ck, okHash))) {
+      if (method === 'POST') {
+        const form = await request.formData().catch(() => null);
+        const pw = String((form && form.get('post_password')) || '');
+        if (pw && safeEqual(await sha256Hex(pw), okHash)) {
+          const r = new Response(null, { status: 303, headers: { location: postUrl(s, post) } });
+          r.headers.set('set-cookie',
+            `${postPassCookie(post.id)}=${okHash}; Path=/; Max-Age=15552000; HttpOnly; SameSite=Lax`);
+          return r;
+        }
+        return html(site.renderLocked(s, post, true));
+      }
+      return html(site.renderLocked(s, post, false));
+    }
   }
   const [siblings, comments, cfg] = await Promise.all([
     db.siblings(env.DB, post),
@@ -1048,6 +1080,9 @@ async function api(ctx, url, seg, method, envIn) {
       // 带上按当前永久链接规则算出的地址，后台列表直接展示，不必再拼 /post/:slug
       const sm = await db.settingsMap(dbx);
       data.items = data.items.map((p) => ({ ...p, url: p.type === 'page' ? pageUrl(p) : postUrl(sm, p) }));
+      // 防呆：本段虽在上面的「全部需登录」守卫之后，但阅读密码不该跟着列表外流，
+      // 万一守卫将来被挪动，这里也能兜住
+      if (!user) data.items.forEach((p) => { delete p.password; });
       return json(data);
     }
     // 新建 POST /api/posts
@@ -1065,6 +1100,7 @@ async function api(ctx, url, seg, method, envIn) {
         title, slug: body.slug, status,
         type: body.type === 'page' ? 'page' : 'post',
         in_nav: body.in_nav,   // 未传时 db 层默认 1（导航显示）
+        password: body.password,   // 未传＝不加密；页面编辑器不传这一项
         category_id: body.category_id ? parseInt(body.category_id, 10) : null,
         content_md: contentMd, content_html: contentHtml, excerpt,
         cover_key: body.cover_key || null, tags: Array.isArray(body.tags) ? body.tags : [],
@@ -1077,7 +1113,12 @@ async function api(ctx, url, seg, method, envIn) {
       const id = parseInt(seg[1], 10);
       const post = await db.getPost(dbx, { id });
       if (!post) return err('文章不存在', 404);
-      if (method === 'GET') return json({ ...post, url: post.type === 'page' ? pageUrl(post) : postUrl(await db.settingsMap(dbx), post) });
+      if (method === 'GET') {
+        const out = { ...post, url: post.type === 'page' ? pageUrl(post) : postUrl(await db.settingsMap(dbx), post) };
+        // 只有登录态才带密码（后台编辑器要回填明文，博主自己也看得见）；其余一律剥掉
+        if (!user) delete out.password;
+        return json(out);
+      }
       if (method === 'DELETE') {
         await db.deletePost(dbx, id);
         return json({ ok: true });
@@ -1097,6 +1138,8 @@ async function api(ctx, url, seg, method, envIn) {
           // type / in_nav 只在显式传了才改：文章编辑不传，就不会被误改成页面
           ...(body.type ? { type: body.type === 'page' ? 'page' : 'post' } : {}),
           ...(body.in_nav != null ? { in_nav: body.in_nav ? 1 : 0 } : {}),
+          // 密码只有文章编辑器会传（未勾选传空串＝取消加密）；不传就不动已有密码
+          ...(body.password != null ? { password: body.password } : {}),
           category_id: body.category_id ? parseInt(body.category_id, 10) : null,
           content_md: contentMd, content_html: contentHtml, excerpt,
           cover_key: body.cover_key || null,

@@ -97,6 +97,11 @@ async function uniqueSlug(db, table, base, excludeId) {
   return `${base}-${Date.now()}`;
 }
 
+// 访问密码：空=不加密；不传（null/undefined）表示「本次不改」，与「主动清空」区分开。
+// ★ 原版是 SQL 的 `ALTER TABLE posts ADD COLUMN password TEXT NOT NULL DEFAULT ''`，
+//   文档库没有 DDL 可挂，所以「缺字段的老数据」在下面 rowOf 里就地归一化成空串。
+export const postPass = (v) => (v == null ? '' : String(v).slice(0, 64));
+
 // ---------- posts ----------
 // 元数据行 → 对外结构。catById / tags / pt 由调用方一次读齐后传入，
 // 避免每篇文章都去查一遍分类与标签。
@@ -127,6 +132,11 @@ function rowOf(p, catById, tags, pt) {
     // 阅读数：老数据 / 老备份里没有这个字段，缺省当 0
     view_count: Number(p.view_count) || 0,
     word_count: Number(p.word_count) || 0,
+    // 访问密码（空串＝不加密）。老数据没有这个字段 → 当空串，即「没加密」。
+    // 只对**已登录**的后台接口返回明文（要回填到编辑器），前台与公开接口由 entry 层删掉。
+    password: postPass(p.password),
+    // 是否加密：前台据此隐藏摘要与正文。只暴露布尔值，不因此泄露密码本身
+    locked: !!String(p.password || ''),
     category: c ? {
       id: c.id, name: c.name, slug: c.slug,
       full_slug: catFullSlug(c, catById),
@@ -148,7 +158,7 @@ async function loadTaxonomy(db) {
 // type：'post' 文章（默认）| 'page' 独立页面 | 'all' 两者都要
 // 默认只取文章：首页 / 分类 / 标签 / 归档 / 搜索 / RSS 都不该出现「关于我」这类页面，
 // 除非调用方显式传 type，页面由此天然与文章流隔离。
-export async function listPosts(db, { status = 'published', type = 'post', cat, tag, q, inNav, page = 1, per = 8 } = {}) {
+export async function listPosts(db, { status = 'published', type = 'post', cat, tag, q, inNav, unlockedOnly, page = 1, per = 8 } = {}) {
   const { posts, cats, tags, pt, catById } = await loadTaxonomy(db);
 
   let list = posts.filter((p) => {
@@ -156,6 +166,8 @@ export async function listPosts(db, { status = 'published', type = 'post', cat, 
     if (type && type !== 'all' && (p.type === 'page' ? 'page' : 'post') !== type) return false;
     // 老数据没有 in_nav 字段，按「进导航」处理，与 SQL 版列默认值 1 一致
     if (inNav && !(Number(p.in_nav == null ? 1 : p.in_nav))) return false;
+    // RSS 专用：加密文章不进订阅（订阅是明文分发，收进去等于把密码绕过去）
+    if (unlockedOnly && String(p.password || '')) return false;
     if (cat) {
       const c = cats.find((x) => x.slug === cat);
       // 查不到这个分类就返回空，绝不能退化成「不过滤」把所有文章都列出来
@@ -224,6 +236,8 @@ export async function createPost(db, f) {
     cover_key: f.cover_key || null,
     status: f.status || 'draft',
     category_id: f.category_id != null ? f.category_id : null,
+    // 未传＝不加密（页面编辑器根本不传 password）
+    password: postPass(f.password),
     created_at: t,
     updated_at: t,
     published_at: f.status === 'published' ? (f.published_at || t) : null,
@@ -273,6 +287,9 @@ export async function updatePost(db, id, f) {
       x.type = type;
       if (f.in_nav != null) x.in_nav = f.in_nav ? 1 : 0;
       else if (x.in_nav == null) x.in_nav = old.in_nav == null ? 1 : old.in_nav;
+      // 只有显式传了才改密码：文章编辑器每次都传（未勾选传空串 = 取消加密），
+      // 页面编辑器不传，就不会把已有密码冲掉
+      if (f.password != null) x.password = postPass(f.password);
     }
     return list;
   });
@@ -827,6 +844,9 @@ export async function restoreAll(db, data) {
     if (m.excerpt == null) m.excerpt = '';
     // 阅读数：备份里带就原样留着（换站迁移时不该把已有阅读量清零），缺了才补 0
     if (m.view_count == null) m.view_count = 0;
+    // 访问密码：备份里带就原样留着（加密的旧文章换站后还得能锁住），缺了才补空串
+    // （补成 undefined 的话，读出来会当「同 undefined」而误判成未加密）
+    m.password = postPass(m.password);
   });
 
   await db.write('settings', next);
