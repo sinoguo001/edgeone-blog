@@ -61,14 +61,26 @@ export const API = {
     try {
       data = ct.includes('application/json') ? await r.json() : await r.text();
     } catch (e) { /* ignore */ }
-    if (r.status === 401 && !url.startsWith('/auth') && !url.startsWith('/state')) {
+    // 401 分两种，必须区别对待：
+    // ① 我们自己发的会话过期 —— 响应体一定是 {error} 的 JSON，踢到登录页是对的；
+    // ② 平台拦下来的 —— 例如 EdgeOne 预览链接超时（有效期 3 小时）、或加速区域设为
+    //    「全球可用区（不含中国大陆）」而人在国内。这类 401 与「有没有登录」毫无关系，
+    //    跳到登录页只会把人误导到错误方向（登录也进不去），所以原样报出来。
+    const ours401 = r.status === 401 && !!(data && typeof data === 'object' && data.error);
+    if (ours401 && !url.startsWith('/auth') && !url.startsWith('/state')) {
       if (location.hash !== '#/login') location.hash = '#/login';
       const e = new Error('请先登录');
       e.code = 401;
       throw e;
     }
     if (!r.ok) {
-      const e = new Error((data && data.error) || '请求失败 (' + r.status + ')');
+      const detail = (data && typeof data === 'object' && data.error) ? data.error : '';
+      const e = new Error(detail || (r.status === 401
+        ? '请求被平台拦截（HTTP 401），与登录无关。EdgeOne 对「项目域名 / 部署域名」有合规限制：'
+          + '预览链接有效期仅 3 小时，超时即返回 401；若加速区域选的是「全球可用区（不含中国大陆）」，'
+          + '中国大陆网络访问也会 401。请在控制台「项目概览」右上角点「预览」取新链接，'
+          + '或绑定自有域名以获得稳定访问。'
+        : '请求失败 (' + r.status + ')'));
       e.code = r.status;
       throw e;
     }
