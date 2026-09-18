@@ -7,14 +7,17 @@
 //   {"error":"Not Found","message":"The requested path does not exist"}
 // 表现就是「后台正常、/categories 正常、rss 正常，唯独首页 404」。
 //
-// 首页渲染逻辑本来就写在 `[[default]].js` 的 front() 里（seg.length === 0 分支），
-// 这里原样转发即可，不重复实现 —— 否则两处逻辑会各改各的。
+// 官方路由表里明确列了 /cloud-functions/index.js → example.com/，这是正规做法。
+// 路由优先级「静态 > 单级动态 > 多级动态(Catch-all)」：index.js 属静态路由，
+// 优先级高于 catch-all。首页渲染就在分发器的 front() 里（seg.length === 0 分支）。
 //
-// 路由优先级「静态 > 单级动态 > 多级动态」：index.js 属于静态路由，
-// 优先级高于 catch-all，即使将来平台让 catch-all 也能匹配 `/`，走的仍是这里。
+// ★ 这里**绝不能**写成 `import { onRequest } from './[[default]].js'`：
+//   两个入口文件的同名导出会被构建器并进同一作用域，构建报
+//   `The symbol "onRequest" has already been declared`（2026-09-18 实测）。
+//   所以真正的实现放在辅助模块 _lib/entry.js，两个入口各自薄薄一层转发。
 // ============================================================
-import { onRequest as handleAll } from './[[default]].js';
+import { handleRequest } from './_lib/entry.js';
 
 export async function onRequest(ctx) {
-  return handleAll(ctx);
+  return handleRequest(ctx);
 }
